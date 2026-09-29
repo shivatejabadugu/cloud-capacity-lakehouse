@@ -1,0 +1,73 @@
+x-app: &app
+  build: .
+  user: "${AIRFLOW_UID:-50000}:0"
+  volumes:
+    - ./lakehouse:/opt/project/lakehouse
+    - ./producer:/opt/project/producer
+    - ./dags:/opt/airflow/dags
+    - ./data:/opt/project/data
+  environment:
+    KAFKA_BOOTSTRAP: kafka:9092
+    LAKEHOUSE_ROOT: /opt/project/data/lakehouse
+    SPARK_DRIVER_MEMORY: 2g
+
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  kafka-init:
+    image: apache/kafka:3.8.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for t in telemetry.metrics inventory.node_changes; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic $$t --partitions 3 --replication-factor 1 --config retention.ms=604800000
+        done
+
+  producer:
+    <<: *app
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    command: ["python", "-m", "producer.produce", "--backfill-hours", "6", "--interval", "60"]
+    restart: unless-stopped
+
+  airflow:
+    <<: *app
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    command: ["standalone"]
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      LAKEHOUSE_ROOT: /opt/project/data/lakehouse
+      SPARK_DRIVER_MEMORY: 2g
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"

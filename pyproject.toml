@@ -1,0 +1,10 @@
+[tool.pytest.ini_options]
+markers = ["integration: needs Delta Lake jars (downloaded from Maven on first run)"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I"]
